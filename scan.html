@@ -272,6 +272,18 @@ function loadDecoder(i){
   function accept(mod){
     var fn = pickReadFn(mod);
     if (typeof fn !== "function") throw new Error("thiếu readBarcodes");
+    // Ép thư viện tải file .wasm từ repo (mặc định nó trỏ ra CDN — mạng chặn)
+    try{
+      var wasmUrl = new URL("./zxing_reader.wasm" + (location.search || ""), location.href).href;
+      var overrides = { locateFile: function(path, prefix){
+        return /\.wasm$/.test(path) ? wasmUrl : prefix + path;
+      }};
+      if (typeof mod.prepareZXingModule === "function"){
+        mod.prepareZXingModule({ overrides: overrides });
+      } else if (typeof mod.setZXingModuleOverrides === "function"){
+        mod.setZXingModuleOverrides(overrides);
+      }
+    }catch(e){}
     readBarcodesFn = fn;
     try { readBarcodesFn(new ImageData(2,2), READ_OPTS).catch(function(){}); } catch(e){}
     if (gate.hidden) setStatus("Đang quét…");
