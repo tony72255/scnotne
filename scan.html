@@ -221,6 +221,38 @@ function withTimeout(promise, ms, label){
   });
 }
 
+// Nạp file CommonJS (bản Node) bằng thẻ <script> + giả lập exports/module
+function loadAsCjs(src){
+  return new Promise(function(resolve, reject){
+    var moduleObj = { exports: {} };
+    var hadE = "exports" in window, pE = window.exports;
+    var hadM = "module"  in window, pM = window.module;
+    var hadR = "require" in window, pR = window.require;
+    window.exports = moduleObj.exports;
+    window.module  = moduleObj;
+    window.require = function(){ return {}; };
+    function cleanup(){
+      if (hadE) window.exports = pE; else { try{ delete window.exports; }catch(e){} }
+      if (hadM) window.module  = pM; else { try{ delete window.module;  }catch(e){} }
+      if (hadR) window.require = pR; else { try{ delete window.require; }catch(e){} }
+    }
+    var s = document.createElement("script");
+    s.src = src;
+    s.onload = function(){
+      var m = moduleObj.exports || {};
+      if (m.default && (m.default.readBarcodes || m.default.readBarcodesFromImageData)) m = m.default;
+      cleanup();
+      resolve(m);
+    };
+    s.onerror = function(){ cleanup(); reject(new Error("script load failed")); };
+    document.head.appendChild(s);
+  });
+}
+
+function pickReadFn(mod){
+  return (mod && (mod.readBarcodes || mod.readBarcodesFromImageData)) || null;
+}
+
 // ============ 1. TẢI BỘ GIẢI MÃ (ưu tiên bản tự host trong repo, chạy nền) ============
 function loadDecoder(i){
   i = i || 0;
@@ -233,20 +265,33 @@ function loadDecoder(i){
     return;
   }
   var src = DECODER_SOURCES[i];
+  var isLocal = src.charAt(0) === ".";
+
+  function accept(mod){
+    var fn = pickReadFn(mod);
+    if (typeof fn !== "function") throw new Error("thiếu readBarcodes");
+    readBarcodesFn = fn;
+    try { readBarcodesFn(new ImageData(2,2), READ_OPTS).catch(function(){}); } catch(e){}
+    if (gate.hidden) setStatus("Đang quét…");
+  }
+
   withTimeout(import(src), 12000, "Tải bộ giải mã")
-    .then(function(mod){
-      var fn = (mod && (mod.readBarcodes || mod.readBarcodesFromImageData)) || null;
-      if (typeof fn !== "function"){
-        throw new Error("thiếu readBarcodes");
-      }
-      readBarcodesFn = fn;
-      // Làm nóng WASM ngay
-      try { readBarcodesFn(new ImageData(2,2), READ_OPTS).catch(function(){}); } catch(e){}
-      if (gate.hidden) setStatus("Đang quét…");
-    })
+    .then(accept)
     .catch(function(err){
-      var label = i === 0 ? "local" : ("cdn" + i);
-      decoderErrors.push(label + ": " + (err && err.message ? err.message : String(err)).slice(0, 80));
+      var msg = (err && err.message ? err.message : String(err));
+      // File tồn tại nhưng là bản CommonJS → thử nạp kiểu CJS
+      if (isLocal && /exports|module/i.test(msg)){
+        withTimeout(loadAsCjs(src), 12000, "Tải bộ giải mã (CJS)")
+          .then(accept)
+          .then(undefined, function(err2){
+            var m2 = (err2 && err2.message ? err2.message : String(err2));
+            decoderErrors.push("local-cjs: " + m2.slice(0, 80));
+            loadDecoder(i + 1);
+          });
+        return;
+      }
+      var label = isLocal ? "local" : ("cdn" + i);
+      decoderErrors.push(label + ": " + msg.slice(0, 80));
       loadDecoder(i + 1);
     });
 }
