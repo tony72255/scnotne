@@ -1,201 +1,378 @@
 <!DOCTYPE html>
 <html lang="vi">
 <head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Quét mã vạch</title>
-    <script src="https://telegram.org/js/telegram-web-app.js"></script>
-    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
-    <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-        body {
-            background: #000;
-            color: #fff;
-            font-family: -apple-system, system-ui, sans-serif;
-            height: 100vh;
-            display: flex;
-            flex-direction: column;
-            overflow: hidden;
-        }
-        #status {
-            padding: 14px 12px;
-            text-align: center;
-            background: #111;
-            font-size: 15px;
-            font-weight: 500;
-            z-index: 20;
-        }
-        #reader, #video {
-            flex: 1;
-            width: 100%;
-            object-fit: cover;
-        }
-        #reader { display: none; }
-        .tip {
-            padding: 10px;
-            text-align: center;
-            font-size: 13px;
-            color: #aaa;
-            background: #111;
-        }
-        .overlay {
-            position: absolute;
-            top: 50%;
-            left: 50%;
-            transform: translate(-50%, -50%);
-            width: 72vw;
-            height: 72vw;
-            max-width: 320px;
-            max-height: 320px;
-            border: 2px solid #00ff88;
-            border-radius: 12px;
-            box-shadow: 0 0 0 9999px rgba(0,0,0,0.4);
-            pointer-events: none;
-            display: none;
-        }
-    </style>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover">
+<title>Quét mã vạch</title>
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  :root{
+    --bg:#0b0f14; --fg:#eef3f8; --dim:#8fa3b8;
+    --accent:#35d07f; --warn:#ffb020; --err:#ff5d5d;
+    --pad-bottom: env(safe-area-inset-bottom, 0px);
+  }
+  *{margin:0;padding:0;box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+  html,body{height:100%;overflow:hidden;background:var(--bg);color:var(--fg);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif}
+  #stage{position:fixed;inset:0}
+  #video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
+
+  /* Lớp phủ tối + khung ngắm "đục lỗ" */
+  #mask{position:absolute;inset:0;pointer-events:none}
+  #roi{
+    position:absolute;left:50%;top:38%;transform:translate(-50%,-50%);
+    width:86vw;max-width:520px;aspect-ratio:2.6/1;
+    border-radius:14px;
+    box-shadow:0 0 0 200vmax rgba(4,8,12,.62);
+    outline:2px solid rgba(255,255,255,.85);
+  }
+  #roi::before,#roi::after,
+  #roi .c1,#roi .c2{
+    content:"";position:absolute;width:26px;height:26px;border:4px solid var(--accent);
+  }
+  #roi::before{left:-3px;top:-3px;border-right:0;border-bottom:0;border-radius:14px 0 0 0}
+  #roi::after{right:-3px;top:-3px;border-left:0;border-bottom:0;border-radius:0 14px 0 0}
+  #roi .c1{left:-3px;bottom:-3px;border-right:0;border-top:0;border-radius:0 0 0 14px}
+  #roi .c2{right:-3px;bottom:-3px;border-left:0;border-top:0;border-radius:0 0 14px 0}
+
+  #scanline{
+    position:absolute;left:8px;right:8px;top:8px;height:2px;border-radius:2px;
+    background:linear-gradient(90deg,transparent,var(--accent),transparent);
+    animation:sweep 1.6s ease-in-out infinite;
+  }
+  @keyframes sweep{
+    0%,100%{top:8px;opacity:.9} 50%{top:calc(100% - 10px);opacity:.6}
+  }
+  @media (prefers-reduced-motion: reduce){ #scanline{animation:none;top:50%} }
+
+  #hint{
+    position:absolute;left:0;right:0;top:calc(38% + 12vw + 24px);
+    text-align:center;color:var(--dim);font-size:15px;line-height:1.5;padding:0 24px;
+  }
+  #hint b{color:var(--fg);font-weight:600}
+
+  /* Thanh điều khiển dưới */
+  #controls{
+    position:absolute;left:0;right:0;bottom:0;
+    padding:16px 20px calc(20px + var(--pad-bottom));
+    display:flex;flex-direction:column;gap:14px;align-items:center;
+  }
+  #zoomRow{display:none;width:min(86vw,520px);align-items:center;gap:12px;color:var(--dim);font-size:13px}
+  #zoomRow.show{display:flex}
+  #zoom{flex:1;accent-color:var(--accent);height:28px}
+  #btnRow{display:flex;gap:14px}
+  .btn{
+    min-width:64px;min-height:64px;border-radius:50%;border:1px solid rgba(255,255,255,.25);
+    background:rgba(255,255,255,.10);color:var(--fg);font-size:26px;
+    display:flex;align-items:center;justify-content:center;
+    backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);
+  }
+  .btn:active{background:rgba(255,255,255,.22)}
+  .btn.on{background:var(--warn);border-color:var(--warn);color:#1a1400}
+  .btn[hidden]{display:none}
+
+  /* Trạng thái / kết quả */
+  #status{
+    position:absolute;left:0;right:0;top:max(14px, env(safe-area-inset-top));
+    text-align:center;font-size:14px;color:var(--dim);padding:0 20px;
+  }
+  #resultCard{
+    position:absolute;left:50%;top:38%;transform:translate(-50%,-50%) scale(.9);
+    background:rgba(10,20,14,.92);border:1px solid var(--accent);border-radius:18px;
+    padding:22px 30px;text-align:center;opacity:0;pointer-events:none;
+    transition:opacity .15s, transform .15s;
+  }
+  #resultCard.show{opacity:1;transform:translate(-50%,-50%) scale(1)}
+  #resultCard .ok{color:var(--accent);font-size:15px;margin-bottom:6px}
+  #resultCard .code{font-size:30px;font-weight:700;letter-spacing:2px;
+    font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
+
+  /* Màn hình lỗi / khởi động */
+  #gate{
+    position:absolute;inset:0;background:var(--bg);z-index:10;
+    display:flex;flex-direction:column;align-items:center;justify-content:center;
+    gap:18px;padding:32px;text-align:center;
+  }
+  #gate[hidden]{display:none}
+  #gate .icon{font-size:52px}
+  #gate h2{font-size:19px;font-weight:600}
+  #gate p{color:var(--dim);font-size:15px;line-height:1.6;max-width:340px}
+  #gate .action{
+    margin-top:6px;background:var(--accent);color:#04120a;border:0;border-radius:12px;
+    padding:14px 30px;font-size:16px;font-weight:600;
+  }
+</style>
 </head>
 <body>
-    <div id="status">Đưa mã vạch vào khung hình</div>
-    <video id="video" playsinline muted></video>
-    <div id="reader"></div>
-    <div class="overlay" id="overlay"></div>
-    <div class="tip">Giữ ổn định • Ánh sáng tốt</div>
+<div id="stage">
+  <video id="video" playsinline muted autoplay></video>
 
-    <script>
-        const tg = window.Telegram.WebApp;
-        tg.ready();
-        tg.expand();
-        tg.setHeaderColor("#111111");
-        tg.setBackgroundColor("#000000");
+  <div id="mask">
+    <div id="roi">
+      <span class="c1"></span><span class="c2"></span>
+      <div id="scanline"></div>
+    </div>
+  </div>
 
-        const statusEl = document.getElementById("status");
-        const video = document.getElementById("video");
-        const overlay = document.getElementById("overlay");
-        let isScanning = true;
-        let stream = null;
-        let animId = null;
+  <div id="status">Đang mở camera…</div>
+  <div id="hint">Đưa <b>mã vạch</b> vào trong khung<br>Giữ máy cách mã 10–15&nbsp;cm</div>
 
-        // ==================== ANDROID: Dùng BarcodeDetector gốc ====================
-        async function startNativeAndroid() {
-            if (!("BarcodeDetector" in window)) return false;
+  <div id="resultCard">
+    <div class="ok">✓ Đã quét được</div>
+    <div class="code" id="resultCode"></div>
+  </div>
 
-            try {
-                const detector = new BarcodeDetector({
-                    formats: ["ean_13", "ean_8", "code_128", "code_39", "upc_a", "upc_e"]
-                });
+  <div id="controls">
+    <div id="zoomRow">
+      <span>1×</span><input id="zoom" type="range" min="1" max="3" step="0.1" value="1"><span id="zoomMax">3×</span>
+    </div>
+    <div id="btnRow">
+      <button class="btn" id="btnTorch" hidden aria-label="Đèn flash">🔦</button>
+    </div>
+  </div>
 
-                stream = await navigator.mediaDevices.getUserMedia({
-                    video: {
-                        facingMode: { ideal: "environment" },
-                        width: { ideal: 1920 },
-                        height: { ideal: 1080 }
-                    },
-                    audio: false
-                });
+  <div id="gate">
+    <div class="icon">📷</div>
+    <h2 id="gateTitle">Chuẩn bị camera…</h2>
+    <p id="gateMsg">Nếu Telegram hỏi quyền camera, hãy bấm Cho phép.</p>
+    <button class="action" id="gateBtn" hidden>Bật camera</button>
+  </div>
+</div>
 
-                video.srcObject = stream;
-                await video.play();
-                overlay.style.display = "block";
+<script type="module">
+import { readBarcodes } from "https://cdn.jsdelivr.net/npm/zxing-wasm@2/dist/reader/index.js";
 
-                const loop = async () => {
-                    if (!isScanning) return;
-                    try {
-                        const barcodes = await detector.detect(video);
-                        if (barcodes.length > 0) {
-                            const code = barcodes[0].rawValue.replace(/[^\d]/g, "");
-                            if (code.length >= 8 && code.length <= 14) {
-                                success(code);
-                                return;
-                            }
-                        }
-                    } catch (e) {}
-                    animId = requestAnimationFrame(loop);
-                };
-                loop();
-                return true;
-            } catch (err) {
-                console.warn("Native failed:", err);
-                return false;
-            }
-        }
+const tg = window.Telegram?.WebApp;
+try { tg?.ready(); tg?.expand(); tg?.disableVerticalSwipes?.(); } catch(e){}
 
-        // ==================== IPHONE: Dùng html5-qrcode tối ưu ====================
-        async function startHtml5iOS() {
-            video.style.display = "none";
-            document.getElementById("reader").style.display = "block";
-            overlay.style.display = "none";
+const video      = document.getElementById("video");
+const roi        = document.getElementById("roi");
+const statusEl   = document.getElementById("status");
+const gate       = document.getElementById("gate");
+const gateTitle  = document.getElementById("gateTitle");
+const gateMsg    = document.getElementById("gateMsg");
+const gateBtn    = document.getElementById("gateBtn");
+const btnTorch   = document.getElementById("btnTorch");
+const zoomRow    = document.getElementById("zoomRow");
+const zoomInput  = document.getElementById("zoom");
+const zoomMaxEl  = document.getElementById("zoomMax");
+const resultCard = document.getElementById("resultCard");
+const resultCode = document.getElementById("resultCode");
 
-            const html5QrCode = new Html5Qrcode("reader", {
-                experimentalFeatures: { useBarCodeDetectorIfSupported: true }
-            });
+const READ_OPTS = {
+  formats: ["EAN-13","EAN-8","UPC-A","UPC-E","Code128","ITF"],
+  tryHarder: true,
+  tryRotate: true,
+  maxNumberOfSymbols: 1,
+};
+const CHECKSUMMED = new Set(["EAN-13","EAN-8","UPC-A","UPC-E"]);
+const DECODE_INTERVAL_MS = 110;   // ~9 fps decode: đủ nhanh, không nóng máy
 
-            const config = {
-                fps: 18,
-                qrbox: function(w, h) {
-                    const minEdge = Math.min(w, h);
-                    const size = Math.floor(minEdge * 0.75);
-                    return { width: size, height: size };
-                },
-                aspectRatio: 1.0,
-                disableFlip: false,
-                videoConstraints: {
-                    facingMode: "environment",
-                    width: { ideal: 1280, min: 720 },
-                    height: { ideal: 720, min: 480 }
-                },
-                formatsToSupport: [
-                    Html5QrcodeSupportedFormats.EAN_13,
-                    Html5QrcodeSupportedFormats.EAN_8,
-                    Html5QrcodeSupportedFormats.CODE_128,
-                    Html5QrcodeSupportedFormats.CODE_39,
-                    Html5QrcodeSupportedFormats.UPC_A,
-                    Html5QrcodeSupportedFormats.UPC_E
-                ]
-            };
+let track = null;
+let stream = null;
+let done = false;
+let busy = false;
+let lastTick = 0;
+let lastText = "", lastCount = 0;
 
-            await html5QrCode.start(
-                { facingMode: "environment" },
-                config,
-                (decodedText) => {
-                    const code = decodedText.replace(/[^\d]/g, "");
-                    if (code.length >= 8 && code.length <= 14) {
-                        html5QrCode.stop();
-                        success(code);
-                    }
-                },
-                () => {}
-            );
-        }
+const cropCanvas = document.createElement("canvas");
+const cropCtx = cropCanvas.getContext("2d", { willReadFrequently: true });
 
-        function success(code) {
-            if (!isScanning) return;
-            isScanning = false;
-            statusEl.innerText = "✅ " + code;
+// Làm nóng WASM ngay khi trang mở (song song với xin quyền camera)
+readBarcodes(new ImageData(2, 2), READ_OPTS).catch(()=>{});
 
-            if (navigator.vibrate) navigator.vibrate([50, 30, 50]);
+function setStatus(t){ statusEl.textContent = t; }
 
-            if (stream) stream.getTracks().forEach(t => t.stop());
-            if (animId) cancelAnimationFrame(animId);
+function validate(text){
+  const s = (text || "").trim();
+  return /^\d+$/.test(s) && [8,12,13,14].includes(s.length) ? s : null;
+}
 
-            setTimeout(() => tg.sendData(code), 250);
-        }
+// ---- Camera ----
+async function startCamera(){
+  gateBtn.hidden = true;
+  gateTitle.textContent = "Chuẩn bị camera…";
+  try{
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: false,
+      video: {
+        facingMode: { ideal: "environment" },
+        width:  { ideal: 1920 },
+        height: { ideal: 1080 },
+      }
+    });
+  }catch(err){
+    showGateError(err);
+    return;
+  }
 
-        // ==================== KHỞI ĐỘNG ====================
-        (async () => {
-            // Ưu tiên Android native
-            const isAndroid = /android/i.test(navigator.userAgent);
-            let usedNative = false;
+  video.srcObject = stream;
+  track = stream.getVideoTracks()[0];
+  try { await video.play(); } catch(e){}
 
-            if (isAndroid) {
-                usedNative = await startNativeAndroid();
-            }
+  // Lấy nét liên tục (nếu thiết bị hỗ trợ)
+  try { await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }); } catch(e){}
 
-            if (!usedNative) {
-                // iPhone hoặc Android fallback
-                await startHtml5iOS();
-            }
-        })();
-    </script>
+  setupTorchAndZoom();
+  gate.hidden = true;
+  setStatus("Đang quét…");
+  scheduleNextFrame();
+}
+
+function showGateError(err){
+  gate.hidden = false;
+  gateTitle.textContent = "Không mở được camera";
+  const denied = err && (err.name === "NotAllowedError" || err.name === "SecurityError");
+  gateMsg.innerHTML = denied
+    ? "Bạn đã từ chối quyền camera.<br>Vào <b>Cài đặt iPhone → Telegram → Camera</b> để bật lại, hoặc bấm nút bên dưới thử lại.<br><br>Cách khác: quay lại chat và <b>gửi ảnh chụp mã vạch</b>, bot vẫn đọc được."
+    : "Thiết bị không cho truy cập camera lúc này.<br>Hãy thử lại, hoặc quay lại chat và <b>gửi ảnh chụp mã vạch</b>.";
+  gateBtn.hidden = false;
+  gateBtn.textContent = "Thử lại";
+}
+gateBtn.addEventListener("click", startCamera);
+
+function setupTorchAndZoom(){
+  let caps = {};
+  try { caps = track.getCapabilities ? track.getCapabilities() : {}; } catch(e){}
+
+  if (caps.torch){
+    btnTorch.hidden = false;
+    let on = false;
+    btnTorch.addEventListener("click", async () => {
+      on = !on;
+      try { await track.applyConstraints({ advanced: [{ torch: on }] }); }
+      catch(e){ on = false; }
+      btnTorch.classList.toggle("on", on);
+    });
+  }
+
+  if (caps.zoom && caps.zoom.max > caps.zoom.min){
+    const max = Math.min(caps.zoom.max, 5);
+    zoomInput.min = caps.zoom.min;
+    zoomInput.max = max;
+    zoomInput.step = (max - caps.zoom.min) / 30;
+    zoomInput.value = caps.zoom.min;
+    zoomMaxEl.textContent = Math.round(max) + "×";
+    zoomRow.classList.add("show");
+    zoomInput.addEventListener("input", () => {
+      try { track.applyConstraints({ advanced: [{ zoom: Number(zoomInput.value) }] }); } catch(e){}
+    });
+  }
+}
+
+// ---- Ánh xạ khung ngắm (trên màn hình) → toạ độ gốc của video (object-fit: cover) ----
+function roiToSourceRect(){
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return null;
+  const ew = video.clientWidth, eh = video.clientHeight;
+
+  const scale = Math.max(ew / vw, eh / vh);        // cover
+  const dispW = vw * scale, dispH = vh * scale;
+  const offX = (dispW - ew) / 2, offY = (dispH - eh) / 2;
+
+  const r = roi.getBoundingClientRect();
+  // Nới khung 12% mỗi chiều để mã hơi lệch vẫn bắt được
+  const padX = r.width * 0.12, padY = r.height * 0.35;
+  let sx = (r.left - padX + offX) / scale;
+  let sy = (r.top  - padY + offY) / scale;
+  let sw = (r.width  + padX * 2) / scale;
+  let sh = (r.height + padY * 2) / scale;
+
+  sx = Math.max(0, sx); sy = Math.max(0, sy);
+  sw = Math.min(sw, vw - sx); sh = Math.min(sh, vh - sy);
+  return { sx, sy, sw, sh };
+}
+
+// ---- Vòng lặp quét ----
+function scheduleNextFrame(){
+  if (done) return;
+  if (video.requestVideoFrameCallback){
+    video.requestVideoFrameCallback(onFrame);
+  } else {
+    requestAnimationFrame(() => onFrame(performance.now()));
+  }
+}
+
+async function onFrame(now){
+  if (done) return;
+  if (busy || (now - lastTick) < DECODE_INTERVAL_MS){
+    scheduleNextFrame();
+    return;
+  }
+  lastTick = now;
+  busy = true;
+
+  try{
+    const rect = roiToSourceRect();
+    if (rect && rect.sw > 40 && rect.sh > 20){
+      cropCanvas.width  = Math.round(rect.sw);
+      cropCanvas.height = Math.round(rect.sh);
+      cropCtx.drawImage(video, rect.sx, rect.sy, rect.sw, rect.sh, 0, 0, cropCanvas.width, cropCanvas.height);
+      const imageData = cropCtx.getImageData(0, 0, cropCanvas.width, cropCanvas.height);
+
+      const results = await readBarcodes(imageData, READ_OPTS);
+      if (results && results.length){
+        handleResult(results[0]);
+      }
+    }
+  }catch(e){ /* bỏ qua frame lỗi */ }
+
+  busy = false;
+  scheduleNextFrame();
+}
+
+function handleResult(res){
+  const code = validate(res.text);
+  if (!code) return;
+
+  // Mã có checksum (EAN/UPC): nhận ngay. Mã khác: cần đọc trùng 2 lần liên tiếp.
+  if (!CHECKSUMMED.has(res.format)){
+    if (code === lastText) lastCount++;
+    else { lastText = code; lastCount = 1; }
+    if (lastCount < 2) return;
+  }
+  finish(code);
+}
+
+function finish(code){
+  if (done) return;
+  done = true;
+
+  try { video.pause(); } catch(e){}
+  try { tg?.HapticFeedback?.notificationOccurred("success"); } catch(e){}
+  beep();
+
+  resultCode.textContent = code;
+  resultCard.classList.add("show");
+  setStatus("Đang gửi về bot…");
+
+  // Giữ 450ms để người dùng thấy mã rồi mới gửi (sendData sẽ tự đóng WebApp)
+  setTimeout(() => {
+    try { tg?.sendData?.(code); } catch(e){}
+    stopCamera();
+  }, 450);
+}
+
+function beep(){
+  try{
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    const o = ctx.createOscillator(), g = ctx.createGain();
+    o.type = "sine"; o.frequency.value = 1250;
+    g.gain.setValueAtTime(0.12, ctx.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.14);
+    o.connect(g); g.connect(ctx.destination);
+    o.start(); o.stop(ctx.currentTime + 0.15);
+  }catch(e){}
+}
+
+function stopCamera(){
+  try { stream?.getTracks().forEach(t => t.stop()); } catch(e){}
+}
+window.addEventListener("pagehide", stopCamera);
+
+// Khởi động: iOS cần trang đã hiển thị; mở webapp qua nút bấm được tính là user gesture,
+// nên thử tự mở camera ngay. Nếu thất bại sẽ hiện nút "Bật camera" (gesture thật).
+startCamera();
+</script>
 </body>
 </html>
