@@ -177,11 +177,16 @@ var READ_OPTS = {
 var CHECKSUMMED = { "EAN-13":1, "EAN-8":1, "UPC-A":1, "UPC-E":1 };
 var DECODE_INTERVAL_MS = 110;
 
-var DECODER_CDNS = [
-  "https://cdn.jsdelivr.net/npm/zxing-wasm@2/dist/reader/index.js",
-  "https://fastly.jsdelivr.net/npm/zxing-wasm@2/dist/reader/index.js",
-  "https://unpkg.com/zxing-wasm@2/dist/reader/index.js"
+var DECODER_SOURCES = [
+  "./index.js",                                                         // tự host: file nằm ngay gốc repo cạnh scan.html
+  "./index.mjs",
+  "./zxing/reader/index.js",                                            // tự host: copy nguyên thư mục dist → zxing/
+  "./zxing/index.js",
+  "https://cdn.jsdelivr.net/npm/zxing-wasm@2/dist/reader/index.js",     // dự phòng CDN
+  "https://unpkg.com/zxing-wasm@2/dist/reader/index.js",
+  "https://cdn.jsdelivr.net/npm/zxing-wasm@1/dist/reader/index.js"
 ];
+var decoderErrors = [];
 
 var track = null, stream = null;
 var readBarcodesFn = null;        // gán khi bộ giải mã tải xong
@@ -216,26 +221,34 @@ function withTimeout(promise, ms, label){
   });
 }
 
-// ==================== 1. TẢI BỘ GIẢI MÃ (chạy nền, thử lần lượt 3 CDN) ====================
+// ============ 1. TẢI BỘ GIẢI MÃ (ưu tiên bản tự host trong repo, chạy nền) ============
 function loadDecoder(i){
   i = i || 0;
-  if (i >= DECODER_CDNS.length){
+  if (i >= DECODER_SOURCES.length){
     decoderFailed = true;
-    if (!gate.hidden) return;
-    setStatus("⚠️ Không tải được bộ giải mã — kiểm tra mạng rồi bấm thử lại");
     showGate("Không tải được bộ giải mã",
-      "Mạng hiện tại chặn máy chủ thư viện.<br>Hãy thử lại, hoặc quay lại chat và <b>gửi ảnh chụp mã vạch</b> — bot vẫn đọc được.",
-      "decoder: all CDNs failed", "Thử lại", function(){ location.reload(); });
+      "Không tải được từ repo lẫn máy chủ dự phòng.<br>Hãy bấm thử lại, hoặc quay lại chat và <b>gửi ảnh chụp mã vạch</b> — bot vẫn đọc được.",
+      decoderErrors.join(" | "),
+      "Thử lại", function(){ location.reload(); });
     return;
   }
-  withTimeout(import(DECODER_CDNS[i]), 12000, "Tải bộ giải mã")
+  var src = DECODER_SOURCES[i];
+  withTimeout(import(src), 12000, "Tải bộ giải mã")
     .then(function(mod){
-      readBarcodesFn = mod.readBarcodes;
-      // Làm nóng WASM
+      var fn = (mod && (mod.readBarcodes || mod.readBarcodesFromImageData)) || null;
+      if (typeof fn !== "function"){
+        throw new Error("thiếu readBarcodes");
+      }
+      readBarcodesFn = fn;
+      // Làm nóng WASM ngay
       try { readBarcodesFn(new ImageData(2,2), READ_OPTS).catch(function(){}); } catch(e){}
       if (gate.hidden) setStatus("Đang quét…");
     })
-    .catch(function(){ loadDecoder(i + 1); });
+    .catch(function(err){
+      var label = i === 0 ? "local" : ("cdn" + i);
+      decoderErrors.push(label + ": " + (err && err.message ? err.message : String(err)).slice(0, 80));
+      loadDecoder(i + 1);
+    });
 }
 loadDecoder(0);
 
