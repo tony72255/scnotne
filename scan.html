@@ -17,7 +17,6 @@
   #stage{position:fixed;inset:0}
   #video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;background:#000}
 
-  /* Lớp phủ tối + khung ngắm "đục lỗ" */
   #mask{position:absolute;inset:0;pointer-events:none}
   #roi{
     position:absolute;left:50%;top:38%;transform:translate(-50%,-50%);
@@ -51,7 +50,6 @@
   }
   #hint b{color:var(--fg);font-weight:600}
 
-  /* Thanh điều khiển dưới */
   #controls{
     position:absolute;left:0;right:0;bottom:0;
     padding:16px 20px calc(20px + var(--pad-bottom));
@@ -71,7 +69,6 @@
   .btn.on{background:var(--warn);border-color:var(--warn);color:#1a1400}
   .btn[hidden]{display:none}
 
-  /* Trạng thái / kết quả */
   #status{
     position:absolute;left:0;right:0;top:max(14px, env(safe-area-inset-top));
     text-align:center;font-size:14px;color:var(--dim);padding:0 20px;
@@ -87,7 +84,6 @@
   #resultCard .code{font-size:30px;font-weight:700;letter-spacing:2px;
     font-variant-numeric:tabular-nums;font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 
-  /* Màn hình lỗi / khởi động */
   #gate{
     position:absolute;inset:0;background:var(--bg);z-index:10;
     display:flex;flex-direction:column;align-items:center;justify-content:center;
@@ -101,6 +97,11 @@
     margin-top:6px;background:var(--accent);color:#04120a;border:0;border-radius:12px;
     padding:14px 30px;font-size:16px;font-weight:600;
   }
+  #gateErr{
+    color:var(--err);font-size:12px;max-width:340px;word-break:break-all;
+    font-family:ui-monospace,Menlo,monospace;
+  }
+  #gateErr:empty{display:none}
 </style>
 </head>
 <body>
@@ -133,200 +134,262 @@
 
   <div id="gate">
     <div class="icon">📷</div>
-    <h2 id="gateTitle">Chuẩn bị camera…</h2>
+    <h2 id="gateTitle">Đang mở camera…</h2>
     <p id="gateMsg">Nếu Telegram hỏi quyền camera, hãy bấm Cho phép.</p>
+    <div id="gateErr"></div>
     <button class="action" id="gateBtn" hidden>Bật camera</button>
   </div>
 </div>
 
-<script type="module">
-import { readBarcodes } from "https://cdn.jsdelivr.net/npm/zxing-wasm@2/dist/reader/index.js";
+<script>
+"use strict";
 
-const tg = window.Telegram?.WebApp;
-try { tg?.ready(); tg?.expand(); tg?.disableVerticalSwipes?.(); } catch(e){}
+var tg = window.Telegram && window.Telegram.WebApp;
+try { tg && tg.ready(); tg && tg.expand(); tg && tg.disableVerticalSwipes && tg.disableVerticalSwipes(); } catch(e){}
 
-const video      = document.getElementById("video");
-const roi        = document.getElementById("roi");
-const statusEl   = document.getElementById("status");
-const gate       = document.getElementById("gate");
-const gateTitle  = document.getElementById("gateTitle");
-const gateMsg    = document.getElementById("gateMsg");
-const gateBtn    = document.getElementById("gateBtn");
-const btnTorch   = document.getElementById("btnTorch");
-const zoomRow    = document.getElementById("zoomRow");
-const zoomInput  = document.getElementById("zoom");
-const zoomMaxEl  = document.getElementById("zoomMax");
-const resultCard = document.getElementById("resultCard");
-const resultCode = document.getElementById("resultCode");
+var video      = document.getElementById("video");
+var roi        = document.getElementById("roi");
+var statusEl   = document.getElementById("status");
+var gate       = document.getElementById("gate");
+var gateTitle  = document.getElementById("gateTitle");
+var gateMsg    = document.getElementById("gateMsg");
+var gateErr    = document.getElementById("gateErr");
+var gateBtn    = document.getElementById("gateBtn");
+var btnTorch   = document.getElementById("btnTorch");
+var zoomRow    = document.getElementById("zoomRow");
+var zoomInput  = document.getElementById("zoom");
+var zoomMaxEl  = document.getElementById("zoomMax");
+var resultCard = document.getElementById("resultCard");
+var resultCode = document.getElementById("resultCode");
 
-const READ_OPTS = {
+// Mọi lỗi bất ngờ đều hiện lên màn hình thay vì chết im lặng
+window.onerror = function(msg, src, line){
+  showGate("Có lỗi xảy ra", "Hãy bấm thử lại. Nếu vẫn lỗi, quay lại chat và <b>gửi ảnh chụp mã vạch</b>.",
+           String(msg) + " @" + line, "Thử lại", function(){ location.reload(); });
+};
+
+var READ_OPTS = {
   formats: ["EAN-13","EAN-8","UPC-A","UPC-E","Code128","ITF"],
   tryHarder: true,
   tryRotate: true,
-  maxNumberOfSymbols: 1,
+  maxNumberOfSymbols: 1
 };
-const CHECKSUMMED = new Set(["EAN-13","EAN-8","UPC-A","UPC-E"]);
-const DECODE_INTERVAL_MS = 110;   // ~9 fps decode: đủ nhanh, không nóng máy
+var CHECKSUMMED = { "EAN-13":1, "EAN-8":1, "UPC-A":1, "UPC-E":1 };
+var DECODE_INTERVAL_MS = 110;
 
-let track = null;
-let stream = null;
-let done = false;
-let busy = false;
-let lastTick = 0;
-let lastText = "", lastCount = 0;
+var DECODER_CDNS = [
+  "https://cdn.jsdelivr.net/npm/zxing-wasm@2/dist/reader/index.js",
+  "https://fastly.jsdelivr.net/npm/zxing-wasm@2/dist/reader/index.js",
+  "https://unpkg.com/zxing-wasm@2/dist/reader/index.js"
+];
 
-const cropCanvas = document.createElement("canvas");
-const cropCtx = cropCanvas.getContext("2d", { willReadFrequently: true });
+var track = null, stream = null;
+var readBarcodesFn = null;        // gán khi bộ giải mã tải xong
+var decoderFailed = false;
+var done = false, busy = false, lastTick = 0;
+var lastText = "", lastCount = 0;
 
-// Làm nóng WASM ngay khi trang mở (song song với xin quyền camera)
-readBarcodes(new ImageData(2, 2), READ_OPTS).catch(()=>{});
+var cropCanvas = document.createElement("canvas");
+var cropCtx = cropCanvas.getContext("2d", { willReadFrequently: true });
 
 function setStatus(t){ statusEl.textContent = t; }
 
-function validate(text){
-  const s = (text || "").trim();
-  return /^\d+$/.test(s) && [8,12,13,14].includes(s.length) ? s : null;
+function showGate(title, msgHtml, errText, btnLabel, btnAction){
+  gate.hidden = false;
+  gateTitle.textContent = title;
+  gateMsg.innerHTML = msgHtml;
+  gateErr.textContent = errText || "";
+  if (btnLabel){
+    gateBtn.hidden = false;
+    gateBtn.textContent = btnLabel;
+    gateBtn.onclick = btnAction;
+  } else {
+    gateBtn.hidden = true;
+  }
 }
 
-// ---- Camera ----
-async function startCamera(){
+function withTimeout(promise, ms, label){
+  return new Promise(function(resolve, reject){
+    var t = setTimeout(function(){ reject(new Error(label + " quá " + (ms/1000) + "s không phản hồi")); }, ms);
+    promise.then(function(v){ clearTimeout(t); resolve(v); },
+                 function(e){ clearTimeout(t); reject(e); });
+  });
+}
+
+// ==================== 1. TẢI BỘ GIẢI MÃ (chạy nền, thử lần lượt 3 CDN) ====================
+function loadDecoder(i){
+  i = i || 0;
+  if (i >= DECODER_CDNS.length){
+    decoderFailed = true;
+    if (!gate.hidden) return;
+    setStatus("⚠️ Không tải được bộ giải mã — kiểm tra mạng rồi bấm thử lại");
+    showGate("Không tải được bộ giải mã",
+      "Mạng hiện tại chặn máy chủ thư viện.<br>Hãy thử lại, hoặc quay lại chat và <b>gửi ảnh chụp mã vạch</b> — bot vẫn đọc được.",
+      "decoder: all CDNs failed", "Thử lại", function(){ location.reload(); });
+    return;
+  }
+  withTimeout(import(DECODER_CDNS[i]), 12000, "Tải bộ giải mã")
+    .then(function(mod){
+      readBarcodesFn = mod.readBarcodes;
+      // Làm nóng WASM
+      try { readBarcodesFn(new ImageData(2,2), READ_OPTS).catch(function(){}); } catch(e){}
+      if (gate.hidden) setStatus("Đang quét…");
+    })
+    .catch(function(){ loadDecoder(i + 1); });
+}
+loadDecoder(0);
+
+// ==================== 2. CAMERA (độc lập với bộ giải mã) ====================
+function startCamera(){
   gateBtn.hidden = true;
-  gateTitle.textContent = "Chuẩn bị camera…";
-  try{
-    stream = await navigator.mediaDevices.getUserMedia({
+  gateTitle.textContent = "Đang mở camera…";
+  gateErr.textContent = "";
+
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia){
+    showGate("Thiết bị không hỗ trợ camera trong Telegram",
+      "Phiên bản Telegram/iOS này không cho mini app dùng camera.<br>Hãy cập nhật Telegram, hoặc quay lại chat và <b>gửi ảnh chụp mã vạch</b>.",
+      "getUserMedia unavailable", null, null);
+    return;
+  }
+
+  withTimeout(
+    navigator.mediaDevices.getUserMedia({
       audio: false,
       video: {
         facingMode: { ideal: "environment" },
         width:  { ideal: 1920 },
-        height: { ideal: 1080 },
+        height: { ideal: 1080 }
       }
-    });
-  }catch(err){
-    showGateError(err);
-    return;
-  }
-
-  video.srcObject = stream;
-  track = stream.getVideoTracks()[0];
-  try { await video.play(); } catch(e){}
-
-  // Lấy nét liên tục (nếu thiết bị hỗ trợ)
-  try { await track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }); } catch(e){}
-
-  setupTorchAndZoom();
-  gate.hidden = true;
-  setStatus("Đang quét…");
-  scheduleNextFrame();
+    }),
+    10000, "Mở camera"
+  ).then(function(s){
+    stream = s;
+    video.srcObject = s;
+    track = s.getVideoTracks()[0];
+    var p = video.play(); if (p && p.catch) p.catch(function(){});
+    try { track.applyConstraints({ advanced: [{ focusMode: "continuous" }] }).catch(function(){}); } catch(e){}
+    setupTorchAndZoom();
+    gate.hidden = true;
+    setStatus(readBarcodesFn ? "Đang quét…" : "Đang tải bộ giải mã…");
+    scheduleNextFrame();
+  }).catch(function(err){
+    var name = err && err.name ? err.name : "";
+    var denied = (name === "NotAllowedError" || name === "SecurityError");
+    showGate(
+      denied ? "Chưa được cấp quyền camera" : "Không mở được camera",
+      denied
+        ? "Vào <b>Cài đặt iPhone → Telegram → bật Camera</b>, sau đó đóng và mở lại cửa sổ quét.<br><br>Cách khác: quay lại chat và <b>gửi ảnh chụp mã vạch</b>, bot vẫn đọc được."
+        : "Hãy bấm nút bên dưới để thử lại.<br>Nếu vẫn không được: quay lại chat và <b>gửi ảnh chụp mã vạch</b>.",
+      name + (err && err.message ? ": " + err.message : ""),
+      "Bật camera", startCamera
+    );
+  });
 }
-
-function showGateError(err){
-  gate.hidden = false;
-  gateTitle.textContent = "Không mở được camera";
-  const denied = err && (err.name === "NotAllowedError" || err.name === "SecurityError");
-  gateMsg.innerHTML = denied
-    ? "Bạn đã từ chối quyền camera.<br>Vào <b>Cài đặt iPhone → Telegram → Camera</b> để bật lại, hoặc bấm nút bên dưới thử lại.<br><br>Cách khác: quay lại chat và <b>gửi ảnh chụp mã vạch</b>, bot vẫn đọc được."
-    : "Thiết bị không cho truy cập camera lúc này.<br>Hãy thử lại, hoặc quay lại chat và <b>gửi ảnh chụp mã vạch</b>.";
-  gateBtn.hidden = false;
-  gateBtn.textContent = "Thử lại";
-}
-gateBtn.addEventListener("click", startCamera);
 
 function setupTorchAndZoom(){
-  let caps = {};
+  var caps = {};
   try { caps = track.getCapabilities ? track.getCapabilities() : {}; } catch(e){}
 
   if (caps.torch){
     btnTorch.hidden = false;
-    let on = false;
-    btnTorch.addEventListener("click", async () => {
+    var on = false;
+    btnTorch.onclick = function(){
       on = !on;
-      try { await track.applyConstraints({ advanced: [{ torch: on }] }); }
-      catch(e){ on = false; }
+      try {
+        track.applyConstraints({ advanced: [{ torch: on }] })
+             .catch(function(){ on = false; btnTorch.classList.remove("on"); });
+      } catch(e){ on = false; }
       btnTorch.classList.toggle("on", on);
-    });
+    };
   }
 
   if (caps.zoom && caps.zoom.max > caps.zoom.min){
-    const max = Math.min(caps.zoom.max, 5);
+    var max = Math.min(caps.zoom.max, 5);
     zoomInput.min = caps.zoom.min;
     zoomInput.max = max;
     zoomInput.step = (max - caps.zoom.min) / 30;
     zoomInput.value = caps.zoom.min;
     zoomMaxEl.textContent = Math.round(max) + "×";
     zoomRow.classList.add("show");
-    zoomInput.addEventListener("input", () => {
-      try { track.applyConstraints({ advanced: [{ zoom: Number(zoomInput.value) }] }); } catch(e){}
-    });
+    zoomInput.oninput = function(){
+      try { track.applyConstraints({ advanced: [{ zoom: Number(zoomInput.value) }] }).catch(function(){}); } catch(e){}
+    };
   }
 }
 
-// ---- Ánh xạ khung ngắm (trên màn hình) → toạ độ gốc của video (object-fit: cover) ----
+// ==================== 3. ÁNH XẠ KHUNG NGẮM → TOẠ ĐỘ VIDEO GỐC ====================
 function roiToSourceRect(){
-  const vw = video.videoWidth, vh = video.videoHeight;
+  var vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh) return null;
-  const ew = video.clientWidth, eh = video.clientHeight;
+  var ew = video.clientWidth, eh = video.clientHeight;
 
-  const scale = Math.max(ew / vw, eh / vh);        // cover
-  const dispW = vw * scale, dispH = vh * scale;
-  const offX = (dispW - ew) / 2, offY = (dispH - eh) / 2;
+  var scale = Math.max(ew / vw, eh / vh);      // object-fit: cover
+  var offX = (vw * scale - ew) / 2, offY = (vh * scale - eh) / 2;
 
-  const r = roi.getBoundingClientRect();
-  // Nới khung 12% mỗi chiều để mã hơi lệch vẫn bắt được
-  const padX = r.width * 0.12, padY = r.height * 0.35;
-  let sx = (r.left - padX + offX) / scale;
-  let sy = (r.top  - padY + offY) / scale;
-  let sw = (r.width  + padX * 2) / scale;
-  let sh = (r.height + padY * 2) / scale;
+  var r = roi.getBoundingClientRect();
+  var padX = r.width * 0.12, padY = r.height * 0.35;
+  var sx = (r.left - padX + offX) / scale;
+  var sy = (r.top  - padY + offY) / scale;
+  var sw = (r.width  + padX * 2) / scale;
+  var sh = (r.height + padY * 2) / scale;
 
   sx = Math.max(0, sx); sy = Math.max(0, sy);
   sw = Math.min(sw, vw - sx); sh = Math.min(sh, vh - sy);
-  return { sx, sy, sw, sh };
+  return { sx: sx, sy: sy, sw: sw, sh: sh };
 }
 
-// ---- Vòng lặp quét ----
+// ==================== 4. VÒNG LẶP QUÉT ====================
 function scheduleNextFrame(){
   if (done) return;
   if (video.requestVideoFrameCallback){
     video.requestVideoFrameCallback(onFrame);
   } else {
-    requestAnimationFrame(() => onFrame(performance.now()));
+    requestAnimationFrame(function(){ onFrame(performance.now()); });
   }
 }
 
-async function onFrame(now){
+function onFrame(now){
   if (done) return;
-  if (busy || (now - lastTick) < DECODE_INTERVAL_MS){
+  if (busy || !readBarcodesFn || (now - lastTick) < DECODE_INTERVAL_MS){
     scheduleNextFrame();
     return;
   }
   lastTick = now;
   busy = true;
 
+  var rect = roiToSourceRect();
+  if (!rect || rect.sw < 40 || rect.sh < 20){
+    busy = false; scheduleNextFrame(); return;
+  }
+
   try{
-    const rect = roiToSourceRect();
-    if (rect && rect.sw > 40 && rect.sh > 20){
-      cropCanvas.width  = Math.round(rect.sw);
-      cropCanvas.height = Math.round(rect.sh);
-      cropCtx.drawImage(video, rect.sx, rect.sy, rect.sw, rect.sh, 0, 0, cropCanvas.width, cropCanvas.height);
-      const imageData = cropCtx.getImageData(0, 0, cropCanvas.width, cropCanvas.height);
+    cropCanvas.width  = Math.round(rect.sw);
+    cropCanvas.height = Math.round(rect.sh);
+    cropCtx.drawImage(video, rect.sx, rect.sy, rect.sw, rect.sh, 0, 0, cropCanvas.width, cropCanvas.height);
+    var imageData = cropCtx.getImageData(0, 0, cropCanvas.width, cropCanvas.height);
 
-      const results = await readBarcodes(imageData, READ_OPTS);
-      if (results && results.length){
-        handleResult(results[0]);
-      }
-    }
-  }catch(e){ /* bỏ qua frame lỗi */ }
+    readBarcodesFn(imageData, READ_OPTS).then(function(results){
+      if (results && results.length) handleResult(results[0]);
+      busy = false; scheduleNextFrame();
+    }).catch(function(){
+      busy = false; scheduleNextFrame();
+    });
+  }catch(e){
+    busy = false; scheduleNextFrame();
+  }
+}
 
-  busy = false;
-  scheduleNextFrame();
+function validate(text){
+  var s = (text || "").trim();
+  if (!/^\d+$/.test(s)) return null;
+  return (s.length === 8 || s.length === 12 || s.length === 13 || s.length === 14) ? s : null;
 }
 
 function handleResult(res){
-  const code = validate(res.text);
+  var code = validate(res.text);
   if (!code) return;
 
-  // Mã có checksum (EAN/UPC): nhận ngay. Mã khác: cần đọc trùng 2 lần liên tiếp.
-  if (!CHECKSUMMED.has(res.format)){
+  if (!CHECKSUMMED[res.format]){
     if (code === lastText) lastCount++;
     else { lastText = code; lastCount = 1; }
     if (lastCount < 2) return;
@@ -339,24 +402,24 @@ function finish(code){
   done = true;
 
   try { video.pause(); } catch(e){}
-  try { tg?.HapticFeedback?.notificationOccurred("success"); } catch(e){}
+  try { tg && tg.HapticFeedback && tg.HapticFeedback.notificationOccurred("success"); } catch(e){}
   beep();
 
   resultCode.textContent = code;
   resultCard.classList.add("show");
   setStatus("Đang gửi về bot…");
 
-  // Giữ 450ms để người dùng thấy mã rồi mới gửi (sendData sẽ tự đóng WebApp)
-  setTimeout(() => {
-    try { tg?.sendData?.(code); } catch(e){}
+  setTimeout(function(){
+    try { tg && tg.sendData && tg.sendData(code); } catch(e){}
     stopCamera();
   }, 450);
 }
 
 function beep(){
   try{
-    const ctx = new (window.AudioContext || window.webkitAudioContext)();
-    const o = ctx.createOscillator(), g = ctx.createGain();
+    var Ctx = window.AudioContext || window.webkitAudioContext;
+    var ctx = new Ctx();
+    var o = ctx.createOscillator(), g = ctx.createGain();
     o.type = "sine"; o.frequency.value = 1250;
     g.gain.setValueAtTime(0.12, ctx.currentTime);
     g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.14);
@@ -366,12 +429,10 @@ function beep(){
 }
 
 function stopCamera(){
-  try { stream?.getTracks().forEach(t => t.stop()); } catch(e){}
+  try { if (stream) stream.getTracks().forEach(function(t){ t.stop(); }); } catch(e){}
 }
 window.addEventListener("pagehide", stopCamera);
 
-// Khởi động: iOS cần trang đã hiển thị; mở webapp qua nút bấm được tính là user gesture,
-// nên thử tự mở camera ngay. Nếu thất bại sẽ hiện nút "Bật camera" (gesture thật).
 startCamera();
 </script>
 </body>
