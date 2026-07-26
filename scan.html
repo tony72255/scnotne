@@ -266,6 +266,8 @@ function loadDecoder(i){
   }
   var src = DECODER_SOURCES[i];
   var isLocal = src.charAt(0) === ".";
+  // File local: gắn cùng ?v=... của trang để phá cache đồng bộ với scan.html
+  var url = isLocal ? src + (location.search || "") : src;
 
   function accept(mod){
     var fn = pickReadFn(mod);
@@ -275,13 +277,13 @@ function loadDecoder(i){
     if (gate.hidden) setStatus("Đang quét…");
   }
 
-  withTimeout(import(src), 12000, "Tải bộ giải mã")
+  withTimeout(import(url), 12000, "Tải bộ giải mã")
     .then(accept)
     .catch(function(err){
       var msg = (err && err.message ? err.message : String(err));
-      // File tồn tại nhưng là bản CommonJS → thử nạp kiểu CJS
-      if (isLocal && /exports|module/i.test(msg)){
-        withTimeout(loadAsCjs(src), 12000, "Tải bộ giải mã (CJS)")
+      // Chỉ coi là file CommonJS khi lỗi nhắc đích danh biến "exports"
+      if (isLocal && /exports/i.test(msg)){
+        withTimeout(loadAsCjs(url), 12000, "Tải bộ giải mã (CJS)")
           .then(accept)
           .then(undefined, function(err2){
             var m2 = (err2 && err2.message ? err2.message : String(err2));
